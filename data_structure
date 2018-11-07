@@ -1,0 +1,46 @@
+// This is data that is known before run-time
+wall:
+	point p1
+	point p2
+	int frontId // Index to side array
+	int backId
+
+tex:
+	std::string name
+	void* data
+	int width
+	int height
+	int pitch
+
+texCoord:
+	float left
+	float right
+	float bottom
+	float top
+
+side:
+	std::shared_ptr<tex> topTex
+	std::shared_ptr<tex> midTex
+	std::shared_ptr<tex> bottomTex
+	texCoord topCoord
+	texCoord midCoord
+	texCoord bottomCoord
+	int sectorId // Index to sector array
+
+sector:
+	float floorHeight
+	float ceilingHeight
+	std::shared_ptr<tex> floorTex
+	std::shared_ptr<tex> ceilingTex
+	// May add texture coords later
+
+
+// This is data that is calculated during run-time
+screenCoords:
+	int leftX
+	int rightX
+	int topLeftY
+	int bottomLeftY
+	int topRightY
+	int bottomRightY
+	int side
