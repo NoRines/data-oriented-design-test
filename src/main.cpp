@@ -174,6 +174,10 @@ namespace render
 		int leftX, rightX;
 		int topLeftY, bottomLeftY;
 		int topRightY, bottomRightY;
+		float texClipLeft;
+		float texClipRight;
+		float oneOverZLeft;
+		float oneOverZRight;
 		int sideId;
 	};
 
@@ -182,6 +186,8 @@ namespace render
 		Vec2f p0;
 		Vec2f p1;
 		int visibleSide;
+		float texClipLeft;
+		float texClipRight;
 	};
 
 	template<typename WallIt>
@@ -297,11 +303,13 @@ namespace render
 			screenCoords.bottomLeftY = (int)(yScaleLeft) + (RES_H / 2);
 			screenCoords.topRightY = -(int)(yScaleRight) + (RES_H / 2);
 			screenCoords.bottomRightY = (int)(yScaleRight) + (RES_H / 2);
+			screenCoords.oneOverZLeft = 1.0f / w0.getX();
+			screenCoords.oneOverZRight = 1.0f / w1.getX();
 		}
 	}
 
-	template<typename ScreenCoordsIt>
-	void outputToScreenBuffer(ScreenCoordsIt beg, ScreenCoordsIt end,
+	template<typename ScreenCoordsIt, typename SideIt>
+	void outputToScreenBuffer(ScreenCoordsIt beg, ScreenCoordsIt end, SideIt sideArr,
 		int screenWidth, int screenHeight, int bufferPitch, uint8_t* buffer)
 	{
 		auto drawVerticalLine = [screenWidth, screenHeight, bufferPitch, buffer](int yMin, int yMax, int x)
@@ -326,18 +334,19 @@ namespace render
 			if(coords.sideId < 0)
 				continue;
 
+			const auto& side = sideArr[coords.sideId];
 
 			int xDiff = (coords.rightX - coords.leftX == 0) ? 1 : coords.rightX - coords.leftX;
 
-			int yTopStep = ((coords.topRightY - coords.topLeftY) << 16) / xDiff;
-			int yBottomStep = ((coords.bottomRightY - coords.bottomLeftY) << 16) / xDiff;
+			float yTopStep = (float)(coords.topRightY - coords.topLeftY) / xDiff;
+			float yBottomStep = (float)(coords.bottomRightY - coords.bottomLeftY) / xDiff;
 
-			int yTop = coords.topLeftY << 16;
-			int yBottom = coords.bottomLeftY << 16;
+			float yTop = coords.topLeftY;
+			float yBottom = coords.bottomLeftY;
 
 			for(int x = coords.leftX; x <= coords.rightX; x++)
 			{
-				drawVerticalLine(yTop >> 16, yBottom >> 16, x);
+				drawVerticalLine((int)yTop, (int)yBottom, x);
 				yTop += yTopStep;
 				yBottom += yBottomStep;
 			}
@@ -404,6 +413,14 @@ void program()
 	std::array<render::ClippedWall, 1> clippedWalls;
 	std::array<render::ScreenCoords, 1> screenCoords;
 
+	auto frontTex = map::loadTextureFromBmp("res/bmp/grass.bmp");
+	auto backTex = map::loadTextureFromBmp("res/bmp/brown_brick.bmp");
+	map::TexCoord defaultTexCoord = {0.0f, 1.0f, 1.0f, 0.0f};
+	std::array<map::Side, 2> sides = {
+		map::Side{nullptr, frontTex, nullptr, {}, defaultTexCoord, {}},
+		map::Side{nullptr, backTex, nullptr, {}, defaultTexCoord, {}}
+	};
+
 	Vec2f playerPos(0.0f);
 	float angle = 0.0f;
 
@@ -412,8 +429,6 @@ void program()
 
 	int frames = 0;
 	int ticks = 0;
-
-	auto tex = map::loadTextureFromBmp("res/bmp/test.bmp");
 
 	while(!done)
 	{
@@ -460,19 +475,10 @@ void program()
 
 		std::fill(bufData.get(), bufData.get() + RES_W * RES_H * 4, 0x00);
 
-		auto itt = tex->data.get();
-		auto outItt = bufData.get();
-		for(int i = 0; i < tex->height; i++)
-		{
-			std::copy(itt, itt + tex->pitch, outItt);
-			outItt += RES_W * 4;
-			itt += tex->pitch;
-		}
-
 		render::translateWalls(playerPos, angle, walls.begin(), walls.end(), translatedWalls.begin());
 		render::clipWalls(translatedWalls.begin(), translatedWalls.end(), clippedWalls.begin());
 		render::genScreenCoords(clippedWalls.begin(), clippedWalls.end(), screenCoords.begin());
-		render::outputToScreenBuffer(screenCoords.begin(), screenCoords.end(), RES_W, RES_H, RES_W * 4, bufData.get());
+		render::outputToScreenBuffer(screenCoords.begin(), screenCoords.end(), sides.begin(), RES_W, RES_H, RES_W * 4, bufData.get());
 
 		SDL_UpdateTexture(texture.get(), NULL, bufData.get(), RES_W * 4);
 
