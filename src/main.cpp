@@ -326,6 +326,141 @@ namespace render
 	}
 
 	template<typename ScreenCoordsIt, typename SideIt>
+	void outputToScreenBuffer_test(ScreenCoordsIt beg, ScreenCoordsIt end, SideIt sideArr,
+		int screenWidth, int screenHeight, int bufferPitch, uint8_t* buffer)
+	{
+		auto drawScanLine = [screenWidth, screenHeight, bufferPitch, buffer]
+			(int y, int minX, int maxX)
+		{
+			if(minX < 0) minX = 0;
+			if(maxX >= screenWidth) maxX = screenWidth - 1;
+
+			uint8_t* destPixStart;
+			for(int x = minX; x <= maxX; x++)
+			{
+				destPixStart = buffer + (x + y * screenWidth) * 4;
+				*destPixStart++ = 0xFF;
+				*destPixStart++ = 0xFF;
+				*destPixStart++ = 0xFF;
+				*destPixStart++ = 0xFF;
+			}
+		};
+		while(beg != end)
+		{
+			const auto& coords = *beg;
+			++beg;
+
+			if(coords.sideId < 0)
+				continue;
+
+			const auto& side = sideArr[coords.sideId];
+			auto texCoord = side.texCoord;
+			texCoord.left += coords.texClipLeft * (side.texCoord.right - side.texCoord.left);
+			texCoord.right -= coords.texClipRight * (side.texCoord.right - side.texCoord.left);
+
+			const int leftHeight = coords.bottomLeftY - coords.topLeftY;
+			const int rightHeight = coords.bottomRightY - coords.topRightY;
+
+			const int minY0 = std::min(coords.topLeftY, coords.topRightY);
+			const int minY1 = std::max(coords.topLeftY, coords.topRightY);
+			const int maxY0 = std::min(coords.bottomLeftY, coords.bottomRightY);
+			const int maxY1 = std::max(coords.bottomLeftY, coords.bottomRightY);
+
+			int handedness = 0;
+			handedness -= leftHeight < rightHeight;
+			handedness += leftHeight > rightHeight;
+
+			int startX0;
+			int endX0;
+			int startX1;
+			int endX1;
+			float fZDist;
+			float lZDist;
+
+			if(handedness < 0)
+			{
+				startX0 = coords.rightX;
+				endX0 = coords.leftX;
+				startX1 = coords.leftX;
+				endX1 = coords.rightX;
+				fZDist = coords.zDistRight;
+				lZDist = coords.zDistLeft;
+			}
+			else
+			{
+				startX1 = coords.rightX;
+				endX1 = coords.leftX;
+				startX0 = coords.leftX;
+				endX0 = coords.rightX;
+				fZDist = coords.zDistLeft;
+				lZDist = coords.zDistRight;
+			}
+
+			const int xDiff = std::abs(endX0 - startX0);
+			const int minYDiff = std::abs(minY1 - minY0);
+			const int maxYDiff = std::abs(maxY1 - maxY0);
+
+			int y = minY0;
+			if(handedness != 0)
+			{
+				const float xStep0 = (float)(endX0 - startX0) / minYDiff;
+
+				const float zDistStep0 = (lZDist - fZDist) / xDiff;
+
+				float x = startX0;
+				float zDist = fZDist;
+				for(; y <= minY1; y++)
+				{
+					if(y >= 0 && y < screenHeight)
+					{
+						// Draw a scanline
+						// zDist, sU, sV, eU, eV, minX, maxX, y
+						if(handedness < 0)
+							drawScanLine(y, (int)x, startX0);
+						else
+							drawScanLine(y, startX0, (int)x);
+					}
+
+					x += xStep0;
+					zDist = fZDist + (x - startX0) * zDistStep0;
+				}
+			}
+
+			while(y < maxY0)
+			{
+				if(y >= 0 && y < screenHeight)
+					drawScanLine(y, coords.leftX, coords.rightX);
+				y++;
+			}
+
+			if(handedness != 0)
+			{
+				const float xStep1 = (float)(endX1 - startX1) / maxYDiff;
+
+				const float zDistStep1 = (lZDist - fZDist) / xDiff;
+
+				float x = startX1;
+				float zDist = lZDist;
+				for(; y <= maxY1; y++)
+				{
+					if(y >= 0 && y < screenHeight)
+					{
+						// Draw a scanline
+						// zDist, sU, sV, eU, eV, minX, maxX, y
+						if(handedness < 0)
+							drawScanLine(y, x, endX1);
+						else
+							drawScanLine(y, endX1, x);
+					}
+
+					x += xStep1;
+					zDist = lZDist + (x - startX1) * zDistStep1;
+				}
+			}
+		}
+	}
+
+	template<typename ScreenCoordsIt, typename SideIt>
 	void outputToScreenBuffer(ScreenCoordsIt beg, ScreenCoordsIt end, SideIt sideArr,
 		int screenWidth, int screenHeight, int bufferPitch, uint8_t* buffer)
 	{
@@ -356,7 +491,10 @@ namespace render
 			{
 				srcPixStart = tex->data.get() + (u + (((int)v % texHeight) * texWidth)) * 4;
 				destPixStart = buffer + (x + y * screenWidth) * 4;
-				std::copy(srcPixStart, srcPixStart + 4, destPixStart);
+				*destPixStart++ = *srcPixStart++;
+				*destPixStart++ = *srcPixStart++;
+				*destPixStart++ = *srcPixStart++;
+				*destPixStart++ = *srcPixStart++;
 				v += vStep;
 			}
 		};
@@ -464,7 +602,7 @@ void program()
 
 	auto frontTex = map::loadTextureFromBmp("res/bmp/grass.bmp");
 	auto backTex = map::loadTextureFromBmp("res/bmp/brown_brick.bmp");
-	map::TexCoord defaultTexCoord = {0.0f, 1.0f, 1.0f, 0.0f};
+	map::TexCoord defaultTexCoord = {0.5f, 1.0f, 1.0f, 0.5f};
 	std::array<map::Side, 2> sides = {
 		map::Side{nullptr, frontTex, nullptr, defaultTexCoord},
 		map::Side{nullptr, backTex, nullptr, defaultTexCoord}
@@ -481,7 +619,7 @@ void program()
 
 	while(!done)
 	{
-		int frameTicks = limitFps<std::chrono::microseconds, 70>(startTime, endTime);
+		int frameTicks = limitFps<std::chrono::microseconds, 300>(startTime, endTime);
 		ticks += frameTicks;
 		double frameTime = frameTicks / 1000000.0;
 
@@ -527,7 +665,8 @@ void program()
 		render::translateWalls(playerPos, angle, walls.begin(), walls.end(), translatedWalls.begin());
 		render::clipWalls(translatedWalls.begin(), translatedWalls.end(), clippedWalls.begin());
 		render::genScreenCoords(clippedWalls.begin(), clippedWalls.end(), screenCoords.begin());
-		render::outputToScreenBuffer(screenCoords.begin(), screenCoords.end(), sides.begin(), RES_W, RES_H, RES_W * 4, bufData.get());
+		//render::outputToScreenBuffer(screenCoords.begin(), screenCoords.end(), sides.begin(), RES_W, RES_H, RES_W * 4, bufData.get());
+		render::outputToScreenBuffer_test(screenCoords.begin(), screenCoords.end(), sides.begin(), RES_W, RES_H, RES_W * 4, bufData.get());
 
 		SDL_UpdateTexture(texture.get(), NULL, bufData.get(), RES_W * 4);
 
