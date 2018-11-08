@@ -70,9 +70,7 @@ namespace map
 		std::shared_ptr<Tex> topTex;
 		std::shared_ptr<Tex> midTex;
 		std::shared_ptr<Tex> botTex;
-		TexCoord topCoord;
-		TexCoord midCoord;
-		TexCoord botCoord;
+		TexCoord texCoord;
 		int sectorId;
 	};
 
@@ -176,8 +174,8 @@ namespace render
 		int topRightY, bottomRightY;
 		float texClipLeft;
 		float texClipRight;
-		float oneOverZLeft;
-		float oneOverZRight;
+		float zDistLeft;
+		float zDistRight;
 		int sideId;
 	};
 
@@ -224,6 +222,12 @@ namespace render
 			auto& visibleSide = out->visibleSide;
 			auto& w0 = out->p0;
 			auto& w1 = out->p1;
+			auto& texClipLeft = out->texClipLeft;
+			auto& texClipRight = out->texClipRight;
+
+			texClipLeft = 0.0f;
+			texClipRight = 0.0f;
+
 			w0 = beg->p0;
 			w1 = beg->p1;
 
@@ -250,18 +254,26 @@ namespace render
 				continue;
 			}
 
+			const float wallLength = (w1 - w0).length();
+
 			Vec2f intersection;
 			bool intersectionLeft = lineSegmentIntersection({0.0f},
 				leftBound * 100.0f, w0, w1, intersection);
 			if(intersectionLeft)
 				if(leftDist1 > 0.0f && leftDist0 < 0.0f)
+				{
+					texClipLeft = (intersection - w0).length() / wallLength;
 					w0 = intersection;
+				}
 
 			bool intersectionRight = lineSegmentIntersection({0.0f},
 				rightBound * 100.0f, w0, w1, intersection);
 			if(intersectionRight)
 				if(rightDist0 > 0.0f && rightDist1 < 0.0f)
+				{
+					texClipRight = (w1 - intersection).length() / wallLength;
 					w1 = intersection;
+				}
 
 			if(!intersectionLeft && !intersectionRight)
 				if(w0.getX() < 0.0f || w1.getX() < 0.0f)
@@ -281,6 +293,8 @@ namespace render
 			const auto& visibleSide = beg->visibleSide;
 			const auto& w0 = beg->p0;
 			const auto& w1 = beg->p1;
+			const auto& texClipLeft = beg->texClipLeft;
+			const auto& texClipRight = beg->texClipRight;
 
 			++beg;
 			++out;
@@ -303,8 +317,11 @@ namespace render
 			screenCoords.bottomLeftY = (int)(yScaleLeft) + (RES_H / 2);
 			screenCoords.topRightY = -(int)(yScaleRight) + (RES_H / 2);
 			screenCoords.bottomRightY = (int)(yScaleRight) + (RES_H / 2);
-			screenCoords.oneOverZLeft = 1.0f / w0.getX();
-			screenCoords.oneOverZRight = 1.0f / w1.getX();
+
+			screenCoords.texClipLeft = texClipLeft;
+			screenCoords.texClipRight = texClipRight;
+			screenCoords.zDistLeft = w0.getX();
+			screenCoords.zDistRight = w1.getX();
 		}
 	}
 
@@ -312,18 +329,35 @@ namespace render
 	void outputToScreenBuffer(ScreenCoordsIt beg, ScreenCoordsIt end, SideIt sideArr,
 		int screenWidth, int screenHeight, int bufferPitch, uint8_t* buffer)
 	{
-		auto drawVerticalLine = [screenWidth, screenHeight, bufferPitch, buffer](int yMin, int yMax, int x)
+		auto drawVerticalLine = [screenWidth, screenHeight, bufferPitch, buffer]
+			(int yMin, int yMax, int x, int u, float topTex, float bottomTex,
+			const std::shared_ptr<map::Tex>& tex)
 		{
-			if(yMin < 0) yMin = 0;
-			if(yMax >= screenHeight) yMax = screenHeight - 1;
 			if(x < 0 || x >= screenWidth) return;
 
+			const int yDiff = yMax - yMin;
+			const int& texWidth = tex->width;
+			const int& texHeight = tex->height;
+			float v = topTex * texHeight;
+			const float vMax = bottomTex * texHeight;
+			const float vStep = (vMax - v) / yDiff;
+
+			if(yMin < 0)
+			{
+				v += -yMin * vStep;
+				yMin = 0;
+			}
+			if(yMax >= screenHeight)
+				yMax = screenHeight - 1;
+
+			uint8_t* srcPixStart = nullptr;
+			uint8_t* destPixStart = nullptr;
 			for(int y = yMin; y <= yMax; y++)
 			{
-				*(buffer + (x + y * screenWidth) * 4    ) = 0xFF;
-				*(buffer + (x + y * screenWidth) * 4 + 1) = 0xFF;
-				*(buffer + (x + y * screenWidth) * 4 + 2) = 0xFF;
-				*(buffer + (x + y * screenWidth) * 4 + 3) = 0xFF;
+				srcPixStart = tex->data.get() + (u + (((int)v % texHeight) * texWidth)) * 4;
+				destPixStart = buffer + (x + y * screenWidth) * 4;
+				std::copy(srcPixStart, srcPixStart + 4, destPixStart);
+				v += vStep;
 			}
 		};
 		while(beg != end)
@@ -335,20 +369,35 @@ namespace render
 				continue;
 
 			const auto& side = sideArr[coords.sideId];
+			auto texCoord = side.texCoord;
+			texCoord.left += coords.texClipLeft * (side.texCoord.right - side.texCoord.left);
+			texCoord.right -= coords.texClipRight * (side.texCoord.right - side.texCoord.left);
 
-			int xDiff = (coords.rightX - coords.leftX == 0) ? 1 : coords.rightX - coords.leftX;
+			const int xDiff = (coords.rightX - coords.leftX == 0) ? 1 : coords.rightX - coords.leftX;
 
-			float yTopStep = (float)(coords.topRightY - coords.topLeftY) / xDiff;
-			float yBottomStep = (float)(coords.bottomRightY - coords.bottomLeftY) / xDiff;
+			const float yTopStep = (float)(coords.topRightY - coords.topLeftY) / xDiff;
+			const float yBottomStep = (float)(coords.bottomRightY - coords.bottomLeftY) / xDiff;
 
 			float yTop = coords.topLeftY;
 			float yBottom = coords.bottomLeftY;
 
+			float oneOverZLeft = 1.0f / coords.zDistLeft;
+			const float oneOverZRight = 1.0f / coords.zDistRight;
+			const float oneOverZStep = (oneOverZRight - oneOverZLeft) / xDiff;
+
+			const int& texWidth = side.midTex->width;
+			float texLeft = (texCoord.left * texWidth) / coords.zDistLeft;
+			const float texRight = (texCoord.right * texWidth) / coords.zDistRight;
+			const float texStep = (texRight - texLeft) / xDiff;
+
 			for(int x = coords.leftX; x <= coords.rightX; x++)
 			{
-				drawVerticalLine((int)yTop, (int)yBottom, x);
+				drawVerticalLine((int)yTop, (int)yBottom, x, (int)(texLeft / oneOverZLeft) % texWidth, texCoord.top, texCoord.bottom, side.midTex);
 				yTop += yTopStep;
 				yBottom += yBottomStep;
+
+				oneOverZLeft += oneOverZStep;
+				texLeft += texStep;
 			}
 		}
 	}
@@ -417,8 +466,8 @@ void program()
 	auto backTex = map::loadTextureFromBmp("res/bmp/brown_brick.bmp");
 	map::TexCoord defaultTexCoord = {0.0f, 1.0f, 1.0f, 0.0f};
 	std::array<map::Side, 2> sides = {
-		map::Side{nullptr, frontTex, nullptr, {}, defaultTexCoord, {}},
-		map::Side{nullptr, backTex, nullptr, {}, defaultTexCoord, {}}
+		map::Side{nullptr, frontTex, nullptr, defaultTexCoord},
+		map::Side{nullptr, backTex, nullptr, defaultTexCoord}
 	};
 
 	Vec2f playerPos(0.0f);
