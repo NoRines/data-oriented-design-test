@@ -5,6 +5,11 @@ wall:
 	int frontId // Index to side array
 	int backId
 
+wallseg:
+	point p1
+	point p2
+	int wallId
+
 tex:
 	std::string name
 	void* data
@@ -33,6 +38,10 @@ sector:
 	std::shared_ptr<tex> floorTex
 	std::shared_ptr<tex> ceilingTex
 	// May add texture coords later
+
+subsector:
+	int wallSegBegin
+	int wallSegEnd
 
 
 // This is data that is calculated during run-time

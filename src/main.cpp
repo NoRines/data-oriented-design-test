@@ -1,15 +1,15 @@
+#include "render.h"
+#include "map.h"
 #include <iostream>
 #include <SDL2/SDL.h>
 #include <memory>
 #include <algorithm>
 #include <array>
 #include <unordered_map>
-#include <cstdint>
 #include <chrono>
 #include <thread>
 #include <string>
 #include <fstream>
-#include "Math/Math.h"
 
 // Här är skärm storleken.
 #define RES_W 640
@@ -36,510 +36,6 @@ struct SDL_Destroyer
 		SDL_DestroyTexture(texture);
 	}
 };
-
-namespace map
-{
-	struct Wall
-	{
-		Vec2f p0;
-		Vec2f p1;
-		int frontId;
-		int backId;
-	};
-
-	struct Tex
-	{
-		static constexpr int BYTES_PER_PIXEL = 4;
-		std::string name;
-		std::unique_ptr<uint8_t[]> data;
-		int width;
-		int height;
-		int pitch;
-	};
-
-	struct TexCoord
-	{
-		float left;
-		float right;
-		float top;
-		float bottom;
-	};
-
-	struct Side
-	{
-		std::shared_ptr<Tex> topTex;
-		std::shared_ptr<Tex> midTex;
-		std::shared_ptr<Tex> botTex;
-		TexCoord texCoord;
-		int sectorId;
-	};
-
-	std::shared_ptr<Tex> loadTextureFromBmp(const std::string& fileName)
-	{
-		constexpr char START_ERROR_MSG[] = "Error loadTextureFromBmp: ";
-
-		auto loadedTexture = std::make_shared<Tex>();
-		loadedTexture->name = fileName;
-
-		std::ifstream file(fileName, std::ios::binary | std::ios::in | std::ios::ate);
-
-		if(!file.is_open())
-		{
-			std::cerr << START_ERROR_MSG << "The file " << fileName << " did not open." << std::endl;
-			return std::shared_ptr<Tex>(nullptr);
-		}
-
-		int fileSize = file.tellg();
-		file.seekg(0, file.beg);
-
-		auto buffer = std::make_unique<uint8_t[]>(fileSize);
-		file.read((char*)buffer.get(), fileSize);
-		file.close();
-
-		uint8_t* walker = buffer.get();
-
-		if(walker[0] != 'B' || walker[1] != 'M')
-		{
-			std::cerr << START_ERROR_MSG << "The file " << fileName << " header is not correct." << '\n';
-			return std::shared_ptr<Tex>(nullptr);
-		}
-
-		walker += 10;
-
-		int32_t pixelDataOffset = *((int32_t*)&walker[0]);
-		walker += 8;
-
-		int32_t width = *((int32_t*)&walker[0]);
-		walker += 4;
-		int32_t height = *((int32_t*)&walker[0]);
-		walker += 6;
-
-		int16_t bitsPerPixel = *((int16_t*)&walker[0]);
-
-		if(bitsPerPixel != 24 && bitsPerPixel != 32)
-		{
-			std::cerr << START_ERROR_MSG << "The file " << fileName << " uses the worng bits per pixel. 32 bpp and 24 bpp are supported." << '\n';
-			return std::shared_ptr<Tex>(nullptr);
-		}
-
-		int rowSize = ((bitsPerPixel * width + 31) / 32) * 4;
-
-		loadedTexture->width = width;
-		loadedTexture->height = height;
-		loadedTexture->pitch = width * Tex::BYTES_PER_PIXEL;
-
-		auto texBuffer = std::make_unique<uint8_t[]>(loadedTexture->pitch * loadedTexture->height);
-
-		uint8_t* rowSrc = buffer.get() + pixelDataOffset;
-		rowSrc += rowSize * (height - 1);
-		uint8_t* rowDest = texBuffer.get();
-
-		for(int y = 0; y < height; y++)
-		{
-			uint8_t* pixelSrc = rowSrc;
-			uint8_t* pixelDest = rowDest;
-			for(int x = 0; x < width; x++)
-			{
-				if(bitsPerPixel == 24)
-				{
-					*pixelDest++ = *(pixelSrc++);
-					*pixelDest++ = *(pixelSrc++);
-					*pixelDest++ = *(pixelSrc++);
-					*pixelDest++ = 0xFF;
-				}
-				else if(bitsPerPixel = 32)
-				{
-					*pixelDest++ = *(pixelSrc++);
-					*pixelDest++ = *(pixelSrc++);
-					*pixelDest++ = *(pixelSrc++);
-					*pixelDest++ = *(pixelSrc++);
-				}
-			}
-			rowSrc -= rowSize;
-			rowDest += loadedTexture->pitch;
-		}
-
-		loadedTexture->data = std::move(texBuffer);
-
-		return loadedTexture;
-	}
-}
-
-namespace render
-{
-	struct ScreenCoords
-	{
-		int leftX, rightX;
-		int topLeftY, bottomLeftY;
-		int topRightY, bottomRightY;
-		float texClipLeft;
-		float texClipRight;
-		float zDistLeft;
-		float zDistRight;
-		int sideId;
-	};
-
-	struct ClippedWall
-	{
-		Vec2f p0;
-		Vec2f p1;
-		int visibleSide;
-		float texClipLeft;
-		float texClipRight;
-	};
-
-	template<typename WallIt>
-	void translateWalls(Vec2f playerPos, float angle, WallIt beg,
-			WallIt end, WallIt out)
-	{
-		while(beg != end)
-		{
-			out->frontId = beg->frontId;
-			out->backId = beg->backId;
-			auto& p0 = out->p0;
-			auto& p1 = out->p1;
-			p0 = beg->p0 - playerPos;
-			p1 = beg->p1 - playerPos;
-			p0.rotate(-angle);
-			p1.rotate(-angle);
-
-			++beg;
-			++out;
-		}
-	}
-
-	template<typename WallIt, typename ClippedWallIt>
-	void clipWalls(WallIt beg, WallIt end, ClippedWallIt out)
-	{
-		static const float fov = (90.0f * PI) / 180.0f;
-		static const Vec2f leftBound(std::cos(-fov / 2.0f), std::sin(-fov / 2.0f));
-		static const Vec2f leftNormal = leftBound.getUnit().rotate(HALF_PI);
-		static const Vec2f rightBound(std::cos(fov / 2.0f), std::sin(fov / 2.0f));
-		static const Vec2f rightNormal = rightBound.getUnit().rotate(-HALF_PI);
-
-		while(beg != end)
-		{
-			auto& visibleSide = out->visibleSide;
-			auto& w0 = out->p0;
-			auto& w1 = out->p1;
-			auto& texClipLeft = out->texClipLeft;
-			auto& texClipRight = out->texClipRight;
-
-			texClipLeft = 0.0f;
-			texClipRight = 0.0f;
-
-			w0 = beg->p0;
-			w1 = beg->p1;
-
-			visibleSide = beg->frontId;
-
-			Vec2f wallNormal = (w1 - w0).getUnit().rotate(-HALF_PI);
-			if(distFromLine({0.0f}, w0, wallNormal) > 0.0f)
-			{
-				std::swap(w0, w1);
-				visibleSide = beg->backId;
-			}
-
-			++beg;
-			++out;
-
-			float leftDist0 = distFromLine(w0, leftBound, leftNormal);
-			float leftDist1 = distFromLine(w1, leftBound, leftNormal);
-			float rightDist0 = distFromLine(w0, rightBound, rightNormal);
-			float rightDist1 = distFromLine(w1, rightBound, rightNormal);
-
-			if((rightDist0 < 0.0f && rightDist1 < 0.0f) || (leftDist0 < 0.0f && leftDist1 < 0.0f))
-			{
-				visibleSide = -1;
-				continue;
-			}
-
-			const float wallLength = (w1 - w0).length();
-
-			Vec2f intersection;
-			bool intersectionLeft = lineSegmentIntersection({0.0f},
-				leftBound * 100.0f, w0, w1, intersection);
-			if(intersectionLeft)
-				if(leftDist1 > 0.0f && leftDist0 < 0.0f)
-				{
-					texClipLeft = (intersection - w0).length() / wallLength;
-					w0 = intersection;
-				}
-
-			bool intersectionRight = lineSegmentIntersection({0.0f},
-				rightBound * 100.0f, w0, w1, intersection);
-			if(intersectionRight)
-				if(rightDist0 > 0.0f && rightDist1 < 0.0f)
-				{
-					texClipRight = (w1 - intersection).length() / wallLength;
-					w1 = intersection;
-				}
-
-			if(!intersectionLeft && !intersectionRight)
-				if(w0.getX() < 0.0f || w1.getX() < 0.0f)
-					visibleSide = -1;
-		}
-	}
-
-	template<typename ClippedWallIt, typename ScreenCoordsIt>
-	void genScreenCoords(ClippedWallIt beg, ClippedWallIt end, ScreenCoordsIt out)
-	{
-		static const float fov = (90.0f * PI) / 180.0f;
-		static const float tanHalfFov = std::tan(fov / 2.0f);
-
-		while(beg != end)
-		{
-			auto& screenCoords = *out;
-			const auto& visibleSide = beg->visibleSide;
-			const auto& w0 = beg->p0;
-			const auto& w1 = beg->p1;
-			const auto& texClipLeft = beg->texClipLeft;
-			const auto& texClipRight = beg->texClipRight;
-
-			++beg;
-			++out;
-
-			screenCoords.sideId = visibleSide;
-
-			if(visibleSide < 0)
-			{
-				continue;
-			}
-
-			float xScaleLeft = w0.getY() / (w0.getX() * tanHalfFov);
-			float xScaleRight = w1.getY() / (w1.getX() * tanHalfFov);
-			float yScaleLeft = (0.2f * RES_H) / w0.getX();
-			float yScaleRight = (0.2f * RES_H) / w1.getX();
-
-			screenCoords.leftX = (int)(xScaleLeft * (RES_W / 2) + (RES_W / 2));
-			screenCoords.rightX = (int)(xScaleRight * (RES_W / 2) + (RES_W / 2));
-			screenCoords.topLeftY = -(int)(yScaleLeft) + (RES_H / 2);
-			screenCoords.bottomLeftY = (int)(yScaleLeft) + (RES_H / 2);
-			screenCoords.topRightY = -(int)(yScaleRight) + (RES_H / 2);
-			screenCoords.bottomRightY = (int)(yScaleRight) + (RES_H / 2);
-
-			screenCoords.texClipLeft = texClipLeft;
-			screenCoords.texClipRight = texClipRight;
-			screenCoords.zDistLeft = w0.getX();
-			screenCoords.zDistRight = w1.getX();
-		}
-	}
-
-	template<typename ScreenCoordsIt, typename SideIt>
-	void outputToScreenBuffer_test(ScreenCoordsIt beg, ScreenCoordsIt end, SideIt sideArr,
-		int screenWidth, int screenHeight, int bufferPitch, uint8_t* buffer)
-	{
-		auto drawScanLine = [screenWidth, screenHeight, bufferPitch, buffer]
-			(int y, int minX, int maxX)
-		{
-			if(minX < 0) minX = 0;
-			if(maxX >= screenWidth) maxX = screenWidth - 1;
-
-			uint8_t* destPixStart;
-			for(int x = minX; x <= maxX; x++)
-			{
-				destPixStart = buffer + (x + y * screenWidth) * 4;
-				*destPixStart++ = 0xFF;
-				*destPixStart++ = 0xFF;
-				*destPixStart++ = 0xFF;
-				*destPixStart++ = 0xFF;
-			}
-		};
-		while(beg != end)
-		{
-			const auto& coords = *beg;
-			++beg;
-
-			if(coords.sideId < 0)
-				continue;
-
-			const auto& side = sideArr[coords.sideId];
-			auto texCoord = side.texCoord;
-			texCoord.left += coords.texClipLeft * (side.texCoord.right - side.texCoord.left);
-			texCoord.right -= coords.texClipRight * (side.texCoord.right - side.texCoord.left);
-
-			const int leftHeight = coords.bottomLeftY - coords.topLeftY;
-			const int rightHeight = coords.bottomRightY - coords.topRightY;
-
-			const int minY0 = std::min(coords.topLeftY, coords.topRightY);
-			const int minY1 = std::max(coords.topLeftY, coords.topRightY);
-			const int maxY0 = std::min(coords.bottomLeftY, coords.bottomRightY);
-			const int maxY1 = std::max(coords.bottomLeftY, coords.bottomRightY);
-
-			int handedness = 0;
-			handedness -= leftHeight < rightHeight;
-			handedness += leftHeight > rightHeight;
-
-			int startX0;
-			int endX0;
-			int startX1;
-			int endX1;
-			float fZDist;
-			float lZDist;
-
-			if(handedness < 0)
-			{
-				startX0 = coords.rightX;
-				endX0 = coords.leftX;
-				startX1 = coords.leftX;
-				endX1 = coords.rightX;
-				fZDist = coords.zDistRight;
-				lZDist = coords.zDistLeft;
-			}
-			else
-			{
-				startX1 = coords.rightX;
-				endX1 = coords.leftX;
-				startX0 = coords.leftX;
-				endX0 = coords.rightX;
-				fZDist = coords.zDistLeft;
-				lZDist = coords.zDistRight;
-			}
-
-			const int xDiff = std::abs(endX0 - startX0);
-			const int minYDiff = std::abs(minY1 - minY0);
-			const int maxYDiff = std::abs(maxY1 - maxY0);
-
-			int y = minY0;
-			if(handedness != 0)
-			{
-				const float xStep0 = (float)(endX0 - startX0) / minYDiff;
-
-				const float zDistStep0 = (lZDist - fZDist) / xDiff;
-
-				float x = startX0;
-				float zDist = fZDist;
-				for(; y <= minY1; y++)
-				{
-					if(y >= 0 && y < screenHeight)
-					{
-						// Draw a scanline
-						// zDist, sU, sV, eU, eV, minX, maxX, y
-						if(handedness < 0)
-							drawScanLine(y, (int)x, startX0);
-						else
-							drawScanLine(y, startX0, (int)x);
-					}
-
-					x += xStep0;
-					zDist = fZDist + (x - startX0) * zDistStep0;
-				}
-			}
-
-			while(y < maxY0)
-			{
-				if(y >= 0 && y < screenHeight)
-					drawScanLine(y, coords.leftX, coords.rightX);
-				y++;
-			}
-
-			if(handedness != 0)
-			{
-				const float xStep1 = (float)(endX1 - startX1) / maxYDiff;
-
-				const float zDistStep1 = (lZDist - fZDist) / xDiff;
-
-				float x = startX1;
-				float zDist = lZDist;
-				for(; y <= maxY1; y++)
-				{
-					if(y >= 0 && y < screenHeight)
-					{
-						// Draw a scanline
-						// zDist, sU, sV, eU, eV, minX, maxX, y
-						if(handedness < 0)
-							drawScanLine(y, x, endX1);
-						else
-							drawScanLine(y, endX1, x);
-					}
-
-					x += xStep1;
-					zDist = lZDist + (x - startX1) * zDistStep1;
-				}
-			}
-		}
-	}
-
-	template<typename ScreenCoordsIt, typename SideIt>
-	void outputToScreenBuffer(ScreenCoordsIt beg, ScreenCoordsIt end, SideIt sideArr,
-		int screenWidth, int screenHeight, int bufferPitch, uint8_t* buffer)
-	{
-		auto drawVerticalLine = [screenWidth, screenHeight, bufferPitch, buffer]
-			(int yMin, int yMax, int x, int u, float topTex, float bottomTex,
-			const std::shared_ptr<map::Tex>& tex)
-		{
-			if(x < 0 || x >= screenWidth) return;
-
-			const int yDiff = yMax - yMin;
-			const int& texWidth = tex->width;
-			const int& texHeight = tex->height;
-			float v = topTex * texHeight;
-			const float vMax = bottomTex * texHeight;
-			const float vStep = (vMax - v) / yDiff;
-
-			if(yMin < 0)
-			{
-				v += -yMin * vStep;
-				yMin = 0;
-			}
-			if(yMax >= screenHeight)
-				yMax = screenHeight - 1;
-
-			uint8_t* srcPixStart = nullptr;
-			uint8_t* destPixStart = nullptr;
-			for(int y = yMin; y <= yMax; y++)
-			{
-				srcPixStart = tex->data.get() + (u + (((int)v % texHeight) * texWidth)) * 4;
-				destPixStart = buffer + (x + y * screenWidth) * 4;
-				*destPixStart++ = *srcPixStart++;
-				*destPixStart++ = *srcPixStart++;
-				*destPixStart++ = *srcPixStart++;
-				*destPixStart++ = *srcPixStart++;
-				v += vStep;
-			}
-		};
-		while(beg != end)
-		{
-			const auto& coords = *beg;
-			++beg;
-
-			if(coords.sideId < 0)
-				continue;
-
-			const auto& side = sideArr[coords.sideId];
-			auto texCoord = side.texCoord;
-			texCoord.left += coords.texClipLeft * (side.texCoord.right - side.texCoord.left);
-			texCoord.right -= coords.texClipRight * (side.texCoord.right - side.texCoord.left);
-
-			const int xDiff = (coords.rightX - coords.leftX == 0) ? 1 : coords.rightX - coords.leftX;
-
-			const float yTopStep = (float)(coords.topRightY - coords.topLeftY) / xDiff;
-			const float yBottomStep = (float)(coords.bottomRightY - coords.bottomLeftY) / xDiff;
-
-			float yTop = coords.topLeftY;
-			float yBottom = coords.bottomLeftY;
-
-			float oneOverZLeft = 1.0f / coords.zDistLeft;
-			const float oneOverZRight = 1.0f / coords.zDistRight;
-			const float oneOverZStep = (oneOverZRight - oneOverZLeft) / xDiff;
-
-			const int& texWidth = side.midTex->width;
-			float texLeft = (texCoord.left * texWidth) / coords.zDistLeft;
-			const float texRight = (texCoord.right * texWidth) / coords.zDistRight;
-			const float texStep = (texRight - texLeft) / xDiff;
-
-			for(int x = coords.leftX; x <= coords.rightX; x++)
-			{
-				drawVerticalLine((int)yTop, (int)yBottom, x, (int)(texLeft / oneOverZLeft) % texWidth, texCoord.top, texCoord.bottom, side.midTex);
-				yTop += yTopStep;
-				yBottom += yBottomStep;
-
-				oneOverZLeft += oneOverZStep;
-				texLeft += texStep;
-			}
-		}
-	}
-}
 
 using clock_type = std::conditional<
 	std::chrono::high_resolution_clock::is_steady,
@@ -583,7 +79,10 @@ void program()
 		SDL_CreateTexture(renderer.get(), SDL_PIXELFORMAT_ARGB8888,
 						SDL_TEXTUREACCESS_STREAMING, RES_W, RES_H));
 
-	std::unique_ptr<uint8_t[]> bufData = std::make_unique<uint8_t[]>(RES_W * RES_H * 4);
+	std::unique_ptr<uint8_t[]> screenBuf = std::make_unique<uint8_t[]>(RES_W * RES_H * 4);
+
+	render::buffer_width = RES_W;
+	render::buffer_height = RES_H;
 
 	bool done = false;
 
@@ -595,17 +94,40 @@ void program()
 		{SDLK_SPACE, false}
 	};
 
-	std::array<map::Wall, 1> walls = {map::Wall{{2.0f, 1.0f}, {1.0f, -1.0f}, 0, 1}};
-	std::array<map::Wall, 1> translatedWalls;
-	std::array<render::ClippedWall, 1> clippedWalls;
-	std::array<render::ScreenCoords, 1> screenCoords;
+	std::array<map::wall, 7> walls = {
+		map::wall{{-4.0f, -3.0f}, {1.0f, -1.0f}, 0, -1},
+		map::wall{{1.0f, -1.0f}, {4.0f, 0.0f}, 1, -1},
+		map::wall{{4.0f, 0.0f}, {4.0f, 4.0f}, 2, -1},
+		map::wall{{4.0f, 4.0f}, {0.0f, 4.0f}, 3, -1},
+		map::wall{{0.0f, 4.0f}, {-1.0f, 1.0f}, 4, 5},
+		map::wall{{0.0f, 4.0f}, {-4.0f, 2.0f}, 6, -1},
+		map::wall{{-4.0f, 2.0f}, {-4.0f, -3.0f}, 7, -1}
+	};
+	std::array<map::wall, 7> translatedWalls;
+	std::array<render::clippedwall, 7> clippedWalls;
+	std::array<render::screencoord, 7> screenCoords;
 
-	auto frontTex = map::loadTextureFromBmp("res/bmp/grass.bmp");
-	auto backTex = map::loadTextureFromBmp("res/bmp/brown_brick.bmp");
-	map::TexCoord defaultTexCoord = {0.5f, 1.0f, 1.0f, 0.5f};
-	std::array<map::Side, 2> sides = {
-		map::Side{nullptr, frontTex, nullptr, defaultTexCoord},
-		map::Side{nullptr, backTex, nullptr, defaultTexCoord}
+	auto brownBrick = map::load_texture_from_bmp("res/bmp/brown_brick.bmp");
+	auto grass = map::load_texture_from_bmp("res/bmp/grass.bmp");
+	auto planks = map::load_texture_from_bmp("res/bmp/planks.bmp");
+	auto redCarpet = map::load_texture_from_bmp("res/bmp/red_carpet.bmp");
+	auto sky = map::load_texture_from_bmp("res/bmp/sky.bmp");
+	auto stone_brick = map::load_texture_from_bmp("res/bmp/stone_brick.bmp");
+
+	map::texcoord defaultTexCoord = {0.0f, 1.0f, 0.0f, 1.0f};
+	std::array<map::side, 8> sides = {
+		map::side{nullptr, brownBrick, nullptr, defaultTexCoord, 0},
+		map::side{nullptr, stone_brick, nullptr, defaultTexCoord, 0},
+		map::side{nullptr, planks, nullptr, defaultTexCoord, 0},
+		map::side{nullptr, sky, nullptr, defaultTexCoord, 0},
+		map::side{nullptr, planks, nullptr, defaultTexCoord, 0},
+		map::side{nullptr, planks, nullptr, defaultTexCoord, 0},
+		map::side{nullptr, stone_brick, nullptr, defaultTexCoord, 0},
+		map::side{nullptr, brownBrick, nullptr, defaultTexCoord, 0},
+	};
+
+	std::array<map::sector, 1> sectors = {
+		map::sector{-1.0f, 1.0f, redCarpet, sky}
 	};
 
 	Vec2f playerPos(0.0f);
@@ -619,7 +141,7 @@ void program()
 
 	while(!done)
 	{
-		int frameTicks = limitFps<std::chrono::microseconds, 300>(startTime, endTime);
+		int frameTicks = limitFps<std::chrono::microseconds, 500>(startTime, endTime);
 		ticks += frameTicks;
 		double frameTime = frameTicks / 1000000.0;
 
@@ -660,15 +182,20 @@ void program()
 		if(keyMap[SDLK_RIGHT])
 			angle += 2.0f * frameTime;
 
-		std::fill(bufData.get(), bufData.get() + RES_W * RES_H * 4, 0x00);
+		std::fill(screenBuf.get(), screenBuf.get() + RES_W * RES_H * 4, 0x00);
 
-		render::translateWalls(playerPos, angle, walls.begin(), walls.end(), translatedWalls.begin());
-		render::clipWalls(translatedWalls.begin(), translatedWalls.end(), clippedWalls.begin());
-		render::genScreenCoords(clippedWalls.begin(), clippedWalls.end(), screenCoords.begin());
-		//render::outputToScreenBuffer(screenCoords.begin(), screenCoords.end(), sides.begin(), RES_W, RES_H, RES_W * 4, bufData.get());
-		render::outputToScreenBuffer_test(screenCoords.begin(), screenCoords.end(), sides.begin(), RES_W, RES_H, RES_W * 4, bufData.get());
+		auto translatedWallsEndIt = translatedWalls.begin();
+		render::translate_walls(playerPos, angle, walls.begin(), walls.end(), translatedWalls.begin(), translatedWallsEndIt);
 
-		SDL_UpdateTexture(texture.get(), NULL, bufData.get(), RES_W * 4);
+		auto clippedWallsEndIt = clippedWalls.begin();
+		render::clip_walls(translatedWalls.begin(), translatedWallsEndIt, clippedWalls.begin(), clippedWallsEndIt);
+
+		auto screenCoordsEndIt = screenCoords.begin();
+		render::gen_screen_coords(clippedWalls.begin(), clippedWallsEndIt, screenCoords.begin(), screenCoordsEndIt, sides.begin(), sectors.begin());
+
+		render::output_to_screen_buffer(screenCoords.begin(), screenCoordsEndIt, sides.begin(), RES_W, RES_H, RES_W * 4, screenBuf.get());
+
+		SDL_UpdateTexture(texture.get(), NULL, screenBuf.get(), RES_W * 4);
 
 		SDL_RenderClear(renderer.get());
 		SDL_RenderCopy(renderer.get(), texture.get(), NULL, NULL);

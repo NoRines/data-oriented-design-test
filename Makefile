@@ -6,7 +6,7 @@ LIBS = -lSDL2 -lSDL2main
 EXE_NAME = dod_test
 # ---------------------------------------------------
 
-CC = g++ -std=c++17 -w -Wall -g
+CC = g++ -std=c++17 -w -Wall -g -O3
 
 nullstring =
 space = $(nullstring) #End
